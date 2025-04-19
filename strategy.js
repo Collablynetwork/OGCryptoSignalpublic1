@@ -21,16 +21,34 @@ const btcPriceHistory = [];
 // Initialize log files
 const initializeLogFiles = () => {
   if (!fs.existsSync(RSI_LOG_FILE)) {
-    fs.writeFileSync(RSI_LOG_FILE, 'Timestamp,Symbol,RSI_4h,MACD_4h,RSI_15m,RSI_5m,RSI_1m,Current Price\n');
+    fs.writeFileSync(
+      RSI_LOG_FILE,
+      'Timestamp,Symbol,RSI_4h,MACD_4h,RSI_15m,RSI_1m,Current Price\n'
+    );
   }
   if (!fs.existsSync(BUY_SIGNAL_LOG_FILE)) {
     fs.writeFileSync(
       BUY_SIGNAL_LOG_FILE,
-      'Timestamp,Symbol,RSI_4h,MACD_4h,RSI_15m,RSI_5m,RSI_1m,Buy Price,Sell Price,Duration,Bottom Price,Percentage Drop,BTC Change,BTC 30m Change\n'
+      'Timestamp,Symbol,RSI_4h,MACD_4h,RSI_15m,RSI_1m,Buy Price,Sell Price,Duration,Bottom Price,Percentage Drop,BTC Change,BTC 30m Change\n'
     );
   }
 };
 initializeLogFiles();
+
+// --- Active 4h Signal Windows (UTC) ---
+const isSignalWindow = () => {
+  const now = moment().utc();
+  const totalMin = now.hour() * 60 + now.minute();
+  const windows = [
+    [  30,   90],   // 00:30–01:30
+    [ 270,  330],   // 04:30–05:30
+    [ 510,  570],   // 08:30–09:30
+    [ 750,  810],   // 12:30–13:30
+    [ 990, 1050],   // 16:30–17:30
+    [1230, 1290],   // 20:30–21:30
+  ];
+  return windows.some(([start, end]) => totalMin >= start && totalMin < end);
+};
 
 // --- Indicator Calculations ---
 
@@ -54,10 +72,8 @@ const calculateRSI = (prices, period = RSI_PERIOD) => {
 const calculateEMA = (prices, period) => {
   const k = 2 / (period + 1);
   const ema = [];
-  // first EMA value is simply the SMA of first `period` prices
   const sma = prices.slice(0, period).reduce((sum, p) => sum + p, 0) / period;
   ema[period - 1] = sma;
-  // then continue with EMA formula
   for (let i = period; i < prices.length; i++) {
     ema[i] = prices[i] * k + ema[i - 1] * (1 - k);
   }
@@ -69,8 +85,7 @@ const calculateMACD = (prices) => {
   if (prices.length < 26) return null;
   const ema12 = calculateEMA(prices, 12);
   const ema26 = calculateEMA(prices, 26);
-  const macdLine = ema12[ema12.length - 1] - ema26[ema26.length - 1];
-  return macdLine;
+  return ema12[ema12.length - 1] - ema26[ema26.length - 1];
 };
 
 // --- Data Fetching ---
@@ -102,7 +117,6 @@ const fetchBTCPrice = async () => {
     });
     const price = parseFloat(resp.data.price);
     btcPriceHistory.push({ price, timestamp: moment() });
-    // prune older than 31 minutes
     const cutoff = moment().subtract(31, 'minutes');
     while (btcPriceHistory.length && btcPriceHistory[0].timestamp.isBefore(cutoff)) {
       btcPriceHistory.shift();
@@ -118,33 +132,43 @@ const fetchBTCPrice = async () => {
 const calculateBTCChanges = async () => {
   const current = await fetchBTCPrice();
   if (!current) return { price: null, change: null, change30m: null };
-
   const change = lastBTCPrice
     ? ((current - lastBTCPrice) / lastBTCPrice * 100).toFixed(2)
     : null;
-
   let change30m = null;
   const cutoff = moment().subtract(30, 'minutes');
   const old = btcPriceHistory.find(e => e.timestamp.isSameOrBefore(cutoff));
   if (old) change30m = ((current - old.price) / old.price * 100).toFixed(2);
-
   lastBTCPrice = current;
   return { price: current, change, change30m };
 };
 
 // --- Logging ---
 
-const logRSIAndPrice = (symbol, rsi4h, macd4h, rsi15m, rsi5m, rsi1m, price) => {
+const logRSIAndPrice = (symbol, rsi4h, macd4h, rsi15m, rsi1m, price) => {
   const ts = moment().format('YYYY-MM-DD HH:mm:ss');
-  const line = `${ts},${symbol},${rsi4h},${macd4h},${rsi15m},${rsi5m},${rsi1m},${price}\n`;
+  const line = `${ts},${symbol},${rsi4h},${macd4h},${rsi15m},${rsi1m},${price}\n`;
   fs.appendFile(RSI_LOG_FILE, line, err => {
     if (err) console.error('Error logging RSI data:', err.message);
   });
 };
 
-const logBuySignal = (symbol, rsi4h, macd4h, rsi15m, rsi5m, rsi1m, buyPrice, sellPrice, duration, bottomPrice, drop, btcChange, btcChange30m) => {
+const logBuySignal = (
+  symbol,
+  rsi4h,
+  macd4h,
+  rsi15m,
+  rsi1m,
+  buyPrice,
+  sellPrice,
+  duration,
+  bottomPrice,
+  drop,
+  btcChange,
+  btcChange30m
+) => {
   const ts = moment().format('YYYY-MM-DD HH:mm:ss');
-  const line = `${ts},${symbol},${rsi4h},${macd4h},${rsi15m},${rsi5m},${rsi1m},${buyPrice},${sellPrice},${duration},${bottomPrice},${drop},${btcChange},${btcChange30m}\n`;
+  const line = `${ts},${symbol},${rsi4h},${macd4h},${rsi15m},${rsi1m},${buyPrice},${sellPrice},${duration},${bottomPrice},${drop},${btcChange},${btcChange30m}\n`;
   fs.appendFile(BUY_SIGNAL_LOG_FILE, line, err => {
     if (err) console.error('Error logging buy signal:', err.message);
   });
@@ -154,15 +178,12 @@ const logBuySignal = (symbol, rsi4h, macd4h, rsi15m, rsi5m, rsi1m, buyPrice, sel
 
 export const handleRSI = async (symbol, token, chatIds) => {
   // 1) fetch all indicators
-  const [ rsi4h, rsi15m, prices5m, prices1m ] = await Promise.all([
+  const [ rsi4h, rsi15m, prices1m ] = await Promise.all([
     fetchAndCalculateRSI(symbol, '4h'),
     fetchAndCalculateRSI(symbol, '15m'),
-    fetchCandlestickData(symbol, '5m', RSI_PERIOD + 1),
     fetchCandlestickData(symbol, '1m', RSI_PERIOD + 1),
   ]);
-
-  if (rsi4h === null || rsi15m === null || !prices5m || !prices1m) return;
-  const rsi5m = calculateRSI(prices5m);
+  if (rsi4h === null || rsi15m === null || !prices1m) return;
   const rsi1m = calculateRSI(prices1m);
   const currentPrice = prices1m[prices1m.length - 1];
 
@@ -172,14 +193,20 @@ export const handleRSI = async (symbol, token, chatIds) => {
 
   const btcData = await calculateBTCChanges();
 
-  console.log(`Indicators for ${symbol} → 4h RSI: ${rsi4h}, MACD4h: ${macd4h}, 15m RSI: ${rsi15m}, 5m RSI: ${rsi5m}, 1m RSI: ${rsi1m}, Price: ${currentPrice}`);
-  logRSIAndPrice(symbol, rsi4h, macd4h, rsi15m, rsi5m, rsi1m, currentPrice);
+  console.log(
+    `Indicators for ${symbol} → 4h RSI: ${rsi4h}, MACD4h: ${macd4h}, 15m RSI: ${rsi15m}, ` +
+    `1m RSI: ${rsi1m}, Price: ${currentPrice}`
+  );
+  logRSIAndPrice(symbol, rsi4h, macd4h, rsi15m, rsi1m, currentPrice);
 
   // 2) check existing open signal
   const existing = sellPrices[symbol];
   if (existing) {
     // update entry if price drops further
-    if (currentPrice < existing.sellPrice && (existing.entryPrices.length === 0 || currentPrice <= existing.entryPrices[0] * 0.99)) {
+    if (
+      currentPrice < existing.sellPrice &&
+      (existing.entryPrices.length === 0 || currentPrice <= existing.entryPrices[0] * 0.99)
+    ) {
       existing.entryPrices.unshift(currentPrice);
       const text = `
 📢 **Buy Signal Update**
@@ -196,16 +223,22 @@ export const handleRSI = async (symbol, token, chatIds) => {
     return;
   }
 
-  // 3) new buy condition: macd4h > 0 && rsi4h > 55 && rsi15m < 45 && rsi1m < 30
-  if (macd4h > 0 && rsi4h > 55 && rsi15m < 45 && rsi1m < 30) {
-    const now = moment();
+  // 3) new buy condition only during active windows
+  if (
+    isSignalWindow() &&
+    macd4h > 0 &&
+    rsi4h > 55 &&
+    rsi15m < 45 &&
+    rsi1m < 30
+  ) {
+    const now = moment().utc();
     const lastNotified = lastNotificationTimes[symbol];
     if (lastNotified && now.diff(lastNotified, 'minutes') < 30) return;
     lastNotificationTimes[symbol] = now;
 
     // record entry
     entryPrices[symbol] = [ currentPrice ];
-    const sellPrice = (currentPrice * 1.011).toFixed(8);
+    const sellPrice = (currentPrice * 1.012).toFixed(8);
 
     // send message
     const msg = `
@@ -268,9 +301,12 @@ export const checkTargetAchieved = async (token, chatIds) => {
 
       logBuySignal(
         symbol,
-        /*rsi4h*/ '', /*macd4h*/ '', /*rsi15m*/ '', /*rsi5m*/ '', /*rsi1m*/ '',
+        /*rsi4h*/ rsi4h,
+        /*macd4h*/ macd4h,
+        /*rsi15m*/ rsi15m,
+        /*rsi1m*/ rsi1m,
         entryPrices[0],
-        sellPrice,
+        sellPrices[symbol].sellPrice,
         period,
         bottom,
         drop,
