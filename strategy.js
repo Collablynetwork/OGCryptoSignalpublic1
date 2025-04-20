@@ -23,13 +23,13 @@ const initializeLogFiles = () => {
   if (!fs.existsSync(RSI_LOG_FILE)) {
     fs.writeFileSync(
       RSI_LOG_FILE,
-      'Timestamp,Symbol,RSI_4h,MACD_4h,RSI_15m,RSI_1m,Current Price\n'
+      'Timestamp,Symbol,MACD_6h_Crossover,MACD_4h,RSI_4h,RSI_15m,RSI_1m,Current Price\n'
     );
   }
   if (!fs.existsSync(BUY_SIGNAL_LOG_FILE)) {
     fs.writeFileSync(
       BUY_SIGNAL_LOG_FILE,
-      'Timestamp,Symbol,RSI_4h,MACD_4h,RSI_15m,RSI_1m,Buy Price,Sell Price,Duration,Bottom Price,Percentage Drop,BTC Change,BTC 30m Change\n'
+      'Timestamp,Symbol,MACD_6h_Crossover,MACD_4h,RSI_4h,RSI_15m,RSI_1m,Buy Price,Sell Price,Duration,Bottom Price,Percentage Drop,BTC Change,BTC 30m Change\n'
     );
   }
 };
@@ -80,12 +80,79 @@ const calculateEMA = (prices, period) => {
   return ema;
 };
 
-// Calculate MACD line (EMA12 - EMA26)
+// Calculate complete MACD data (MACD line, signal line, and histogram)
+const calculateCompleteMACD = (prices) => {
+  if (prices.length < 35) return null; // Need at least 26 + 9 periods
+  
+  const ema12 = calculateEMA(prices, 12);
+  const ema26 = calculateEMA(prices, 26);
+  
+  // Calculate MACD line (ema12 - ema26)
+  const macdLine = [];
+  for (let i = 25; i < prices.length; i++) {
+    macdLine.push(ema12[i] - ema26[i]);
+  }
+  
+  // Calculate signal line (9-period EMA of MACD line)
+  const signalLine = calculateEMA(macdLine, 9);
+  
+  // Calculate histogram (MACD line - signal line)
+  const histogram = [];
+  for (let i = 8; i < macdLine.length; i++) {
+    histogram.push(macdLine[i] - signalLine[i]);
+  }
+  
+  return {
+    macdLine,
+    signalLine,
+    histogram,
+    current: {
+      macd: macdLine[macdLine.length - 1],
+      signal: signalLine[signalLine.length - 1],
+      histogram: histogram[histogram.length - 1]
+    },
+    previous: {
+      macd: macdLine[macdLine.length - 2],
+      signal: signalLine[signalLine.length - 2],
+      histogram: histogram[histogram.length - 2]
+    }
+  };
+};
+
+// Original MACD calculation for backward compatibility
 const calculateMACD = (prices) => {
   if (prices.length < 26) return null;
   const ema12 = calculateEMA(prices, 12);
   const ema26 = calculateEMA(prices, 26);
   return ema12[ema12.length - 1] - ema26[ema26.length - 1];
+};
+
+// Detect MACD bullish crossover with lookback period
+const isMACDBullishCrossover = (macdData, lookbackPeriods = 5) => {
+  if (!macdData || !macdData.macdLine || !macdData.signalLine) return false;
+  
+  // First check if MACD is currently above signal (bullish condition)
+  const currentIndex = macdData.macdLine.length - 1;
+  if (macdData.macdLine[currentIndex] > macdData.signalLine[currentIndex]) {
+    // If currently bullish, check for a crossover within the lookback period
+    const startIndex = Math.max(0, currentIndex - lookbackPeriods);
+    
+    for (let i = startIndex; i < currentIndex; i++) {
+      // Check for the moment when MACD crosses above signal
+      if (macdData.macdLine[i] <= macdData.signalLine[i] && 
+          macdData.macdLine[i+1] > macdData.signalLine[i+1]) {
+        return true; // Found a crossover within lookback period
+      }
+    }
+    
+    // If we're in the early stages of a strong bullish trend,
+    // even without a recent crossover, we might want to consider it valid
+    if (macdData.macdLine[currentIndex] > macdData.signalLine[currentIndex] * 1.05) {
+      return true; // MACD is at least 5% above signal line (strong bullish)
+    }
+  }
+  
+  return false;
 };
 
 // --- Data Fetching ---
@@ -107,6 +174,27 @@ const fetchCandlestickData = async (symbol, interval, limit = RSI_PERIOD + 1) =>
 const fetchAndCalculateRSI = async (symbol, interval) => {
   const prices = await fetchCandlestickData(symbol, interval, RSI_PERIOD + 1);
   return prices ? calculateRSI(prices) : null;
+};
+
+// Fetch and check for 6h MACD bullish crossover
+const fetch6hMACDCrossover = async (symbol) => {
+  // We need at least 35 days of data to calculate MACD and signal line
+  const prices = await fetchCandlestickData(symbol, '6h', 50);
+  if (!prices) return { hasCrossover: false, macdData: null };
+  
+  const macdData = calculateCompleteMACD(prices);
+  const hasCrossover = isMACDBullishCrossover(macdData);
+  
+  console.log(`MACD 6h analysis for ${symbol}:`);
+  if (macdData && macdData.current) {
+    console.log(`- Current MACD: ${macdData.current.macd}`);
+    console.log(`- Current Signal: ${macdData.current.signal}`);
+    console.log(`- Current Histogram: ${macdData.current.histogram}`);
+    console.log(`- MACD > Signal: ${macdData.current.macd > macdData.current.signal}`);
+    console.log(`- Bullish Crossover detected: ${hasCrossover}`);
+  }
+  
+  return { hasCrossover, macdData };
 };
 
 // Fetch current BTC price and maintain 30m history
@@ -145,9 +233,10 @@ const calculateBTCChanges = async () => {
 
 // --- Logging ---
 
-const logRSIAndPrice = (symbol, rsi4h, macd4h, rsi15m, rsi1m, price) => {
+const logRSIAndPrice = (symbol, rsi4h, macd4h, rsi15m, rsi1m, price, macd6hCrossover) => {
   const ts = moment().format('YYYY-MM-DD HH:mm:ss');
-  const line = `${ts},${symbol},${rsi4h},${macd4h},${rsi15m},${rsi1m},${price}\n`;
+  // Updated order: timestamp, symbol, macd6hCrossover, macd4h, rsi4h, rsi15m, rsi1m, price
+  const line = `${ts},${symbol},${macd6hCrossover},${macd4h},${rsi4h},${rsi15m},${rsi1m},${price}\n`;
   fs.appendFile(RSI_LOG_FILE, line, err => {
     if (err) console.error('Error logging RSI data:', err.message);
   });
@@ -165,10 +254,11 @@ const logBuySignal = (
   bottomPrice,
   drop,
   btcChange,
-  btcChange30m
+  btcChange30m,
+  macd6hCrossover
 ) => {
   const ts = moment().format('YYYY-MM-DD HH:mm:ss');
-  const line = `${ts},${symbol},${rsi4h},${macd4h},${rsi15m},${rsi1m},${buyPrice},${sellPrice},${duration},${bottomPrice},${drop},${btcChange},${btcChange30m}\n`;
+  const line = `${ts},${symbol},${rsi4h},${macd4h},${rsi15m},${rsi1m},${buyPrice},${sellPrice},${duration},${bottomPrice},${drop},${btcChange},${btcChange30m},${macd6hCrossover}\n`;
   fs.appendFile(BUY_SIGNAL_LOG_FILE, line, err => {
     if (err) console.error('Error logging buy signal:', err.message);
   });
@@ -191,13 +281,16 @@ export const handleRSI = async (symbol, token, chatIds) => {
   const prices4h = await fetchCandlestickData(symbol, '4h', 50);
   const macd4h = prices4h ? calculateMACD(prices4h) : null;
 
+  // check for 6h MACD bullish crossover
+  const { hasCrossover: macd6hCrossover } = await fetch6hMACDCrossover(symbol);
+
   const btcData = await calculateBTCChanges();
 
   console.log(
-    `Indicators for ${symbol} → 4h RSI: ${rsi4h}, MACD4h: ${macd4h}, 15m RSI: ${rsi15m}, ` +
-    `1m RSI: ${rsi1m}, Price: ${currentPrice}`
+    `Indicators for ${symbol} → 6h MACD Crossover: ${macd6hCrossover}, MACD4h: ${macd4h}, 4h RSI: ${rsi4h}, ` +
+    `15m RSI: ${rsi15m}, 1m RSI: ${rsi1m}, Price: ${currentPrice}`
   );
-  logRSIAndPrice(symbol, rsi4h, macd4h, rsi15m, rsi1m, currentPrice);
+  logRSIAndPrice(symbol, rsi4h, macd4h, rsi15m, rsi1m, currentPrice, macd6hCrossover);
 
   // 2) check existing open signal
   const existing = sellPrices[symbol];
@@ -229,7 +322,8 @@ export const handleRSI = async (symbol, token, chatIds) => {
     macd4h > 0 &&
     rsi4h > 55 &&
     rsi15m < 45 &&
-    rsi1m < 30
+    rsi1m < 30 &&
+    macd6hCrossover  // Added 6h MACD bullish crossover condition
   ) {
     const now = moment().utc();
     const lastNotified = lastNotificationTimes[symbol];
@@ -238,7 +332,7 @@ export const handleRSI = async (symbol, token, chatIds) => {
 
     // record entry
     entryPrices[symbol] = [ currentPrice ];
-    const sellPrice = (currentPrice * 1.012).toFixed(8);
+    const sellPrice = (currentPrice * 1.023).toFixed(8);
 
     // send message
     const msg = `
@@ -261,6 +355,7 @@ export const handleRSI = async (symbol, token, chatIds) => {
       messageId: mIds[0],
       buyTime: now,
       btcPriceAtBuy: btcData.price,
+      macd6hCrossover
     };
     bottomPrices[symbol] = currentPrice;
   }
@@ -268,9 +363,10 @@ export const handleRSI = async (symbol, token, chatIds) => {
 
 export const checkTargetAchieved = async (token, chatIds) => {
   for (const symbol in sellPrices) {
-    const { sellPrice, entryPrices, messageId, buyTime, btcPriceAtBuy } = sellPrices[symbol];
+    const { sellPrice, entryPrices, messageId, buyTime, btcPriceAtBuy, macd6hCrossover } = sellPrices[symbol];
     const prices = await fetchCandlestickData(symbol, '1m', RSI_PERIOD + 1);
     if (!prices) continue;
+
     const current = prices[prices.length - 1];
     const btcData = await calculateBTCChanges();
 
@@ -291,7 +387,7 @@ export const checkTargetAchieved = async (token, chatIds) => {
 💎 Token: #${symbol}
 💰 Entry: ${entryPrices[0]}
 💰 Target: ${sellPrice}
-📉 Bottom: ${bottom} (${drop}% drop)
+📉 Bottom: ${bottom} (${drop}% drawdown)
 ⏱️ Duration: ${period}
 💹 Trade Now on: [Binance](https://www.binance.com/en/trade/${symbol})
 `;
@@ -299,19 +395,21 @@ export const checkTargetAchieved = async (token, chatIds) => {
         await editTelegramMessage(token, id, messageId, text);
       }
 
+      // **CORRECTED**: use `drop` (not `drawdown`)
       logBuySignal(
         symbol,
-        /*rsi4h*/ rsi4h,
-        /*macd4h*/ macd4h,
-        /*rsi15m*/ rsi15m,
-        /*rsi1m*/ rsi1m,
+        '',     // rsi4h
+        '',     // macd4h
+        '',     // rsi15m
+        '',     // rsi1m
         entryPrices[0],
-        sellPrices[symbol].sellPrice,
+        sellPrice,
         period,
         bottom,
         drop,
         btcChange,
-        btcData.change30m
+        btcData.change30m,
+        macd6hCrossover ? 'true' : 'false'
       );
 
       delete sellPrices[symbol];
