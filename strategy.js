@@ -332,7 +332,7 @@ export const handleRSI = async (symbol, token, chatIds) => {
 
     // record entry
     entryPrices[symbol] = [ currentPrice ];
-    const sellPrice = (currentPrice * 1.023).toFixed(8);
+    const sellPrice = (currentPrice * 1.012).toFixed(8);
 
     // send message
     const msg = `
