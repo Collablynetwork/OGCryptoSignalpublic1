@@ -259,9 +259,9 @@ const logBuySignal = (
 ) => {
   const ts = moment().format('YYYY-MM-DD HH:mm:ss');
   const line = `${ts},${symbol},${rsi4h},${macd4h},${rsi15m},${rsi1m},${buyPrice},${sellPrice},${duration},${bottomPrice},${drop},${btcChange},${btcChange30m},${macd6hCrossover}\n`;
-  fs.appendFile(BUY_SIGNAL_LOG_FILE, line, err => {
-    if (err) console.error('Error logging buy signal:', err.message);
-  });
+//  fs.appendFile(BUY_SIGNAL_LOG_FILE, line, err => {
+//    if (err) console.error('Error logging buy signal:', err.message);
+//  });
 };
 
 // --- Core Logic ---
